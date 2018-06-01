@@ -1879,6 +1879,7 @@ static void usage(const char *progname)
     fprintf(stderr, "    -t timelimit    Seconds to max. wait for responses\n");
     fprintf(stderr, "    -b windowsize   Size of TCP send/receive buffer, in bytes\n");
     fprintf(stderr, "    -p postfile     File containing data to POST. Remember also to set -T\n");
+    fprintf(stderr, "    -F data-format  Insert ID replace data containing %d to POST, max 10 times. Remember also to set -p\n");
     fprintf(stderr, "    -T content-type Content-type header for POSTing, eg.\n");
     fprintf(stderr, "                    'application/x-www-form-urlencoded'\n");
     fprintf(stderr, "                    Default is 'text/plain'\n");
@@ -2049,6 +2050,23 @@ static int open_postfile(const char *pfile)
     return 0;
 }
 
+static int create_postdata(){
+    int int_len=log10(requests)*11;
+    int i=0;
+    char** postdata_list_format = postdata_list;
+    apr_size_t *postdata_len_list_format_size=postlen_list;
+    apr_size_t postdata_list_format_size=postdata_list_size;
+    postdata_list = (char**)malloc((requests)*(sizeof(char*)));
+	postlen_list = (apr_size_t*)malloc((requests)*(sizeof(apr_size_t)));
+	doclen_list  = (apr_size_t*)malloc((requests)*(sizeof(apr_size_t)));
+    postdata_list_size=requests;
+    for(i=0;i<requests;i++){
+		doclen_list[i]=-1;
+        postdata_list[i] = malloc(sizeof(char)*(postdata_len_list_format_size[i%postdata_list_size]+int_len));
+        sprintf(postdata_list[i],postdata_list_format[i],i);
+        postlen_list[i]=strlen(postdata_list[i]);
+    }
+}
 /* ------------------------------------------------------- */
 
 /* sort out command-line args and call test */
@@ -2151,6 +2169,11 @@ int main(int argc, const char * const argv[])
                     exit(r);
                 }
                 break;
+            case 'F':
+                if (postdata) {
+                    err("Cannot format POST data, need -p file.json\n");
+                }
+                create_postdata();
             case 'r':
                 recverrok = 1;
                 break;
