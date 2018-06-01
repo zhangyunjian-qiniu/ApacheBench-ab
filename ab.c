@@ -248,6 +248,7 @@ struct connection {
     int state;
     apr_size_t read;            /* amount of bytes read */
     apr_size_t bread;           /* amount of body read */
+    int req_index;
     apr_size_t rwrite, rwrote;  /* keep pointers in what we write - across
                                  * EAGAINs */
     apr_size_t length;          /* Content-Length value used for keep-alive */
@@ -299,6 +300,9 @@ char *hostname;         /* host name from URL */
 char *host_field;       /* value of "Host:" header field */
 char *path;             /* path name */
 char postfile[1024];    /* name of file containing post data */
+char **postdata_list=0;
+apr_size_t *postlen_list = 0;
+int	 postdata_list_size=0;
 char *postdata;         /* *buffer containing data from postfile */
 apr_size_t postlen = 0; /* length of data to be POSTed */
 char content_type[1024];/* content type to put in POST header */
@@ -331,6 +335,7 @@ const char *trstring;
 const char *tdstring;
 
 apr_size_t doclen = 0;     /* the length the document should be */
+apr_size_t *doclen_list = 0;     /* the length the document should be */
 apr_int64_t totalread = 0;    /* total number of bytes read */
 apr_int64_t totalbread = 0;   /* totoal amount of entity body read */
 apr_int64_t totalposted = 0;  /* total number of bytes posted, inc. headers */
@@ -359,6 +364,9 @@ apr_time_t start, lasttime, stoptime;
 char _request[2048];
 char *request = _request;
 apr_size_t reqlen;
+char **request_list=0;
+apr_size_t *reqlen_list=0;
+int request_list_size=0;
 
 /* one global throw-away buffer to read stuff into */
 char buffer[8192];
@@ -688,9 +696,7 @@ static void write_request(struct connection * c)
             apr_socket_timeout_set(c->aprsock, 0);
             c->connect = tnow;
             c->rwrote = 0;
-            c->rwrite = reqlen;
-            if (posting)
-                c->rwrite += postlen;
+            c->rwrite = reqlen_list[c->req_index];
         }
         else if (tnow > c->connect + aprtimeout) {
             printf("Send request timed out!\n");
@@ -701,7 +707,7 @@ static void write_request(struct connection * c)
 #ifdef USE_SSL
         if (c->ssl) {
             apr_size_t e_ssl;
-            e_ssl = SSL_write(c->ssl,request + c->rwrote, l);
+            e_ssl = SSL_write(c->ssl,request_list[c->req_index] + c->rwrote, l);
             if (e_ssl != l) {
                 BIO_printf(bio_err, "SSL write failed - closing connection\n");
                 ERR_print_errors(bio_err);
@@ -713,7 +719,7 @@ static void write_request(struct connection * c)
         }
         else
 #endif
-            e = apr_socket_send(c->aprsock, request + c->rwrote, &l);
+            e = apr_socket_send(c->aprsock, request_list[c->req_index] + c->rwrote, &l);
 
         if (e != APR_SUCCESS && !APR_STATUS_IS_EAGAIN(e)) {
             epipe++;
@@ -728,6 +734,8 @@ static void write_request(struct connection * c)
 
     c->endwrite = lasttime = apr_time_now();
     set_conn_state(c, STATE_READ);
+	c->req_index++;
+	c->req_index%=request_list_size;
 }
 
 /* --------------------------------------------------------- */
@@ -1293,11 +1301,11 @@ static void close_connection(struct connection * c)
             good--;     /* connection never happened */
     }
     else {
-        if (good == 1) {
+        if (good == 1 && doclen_list[c->req_index]==-1) {
             /* first time here */
-            doclen = c->bread;
+            doclen_list[c->req_index] = c->bread;
         }
-        else if (c->bread != doclen) {
+        else if (c->bread != doclen_list[c->req_index]) {
             bad++;
             err_length++;
         }
@@ -1527,11 +1535,11 @@ static void read_connection(struct connection * c)
         /* finished a keep-alive connection */
         good++;
         /* save out time */
-        if (good == 1) {
+        if (good == 1 && doclen_list[c->req_index]==-1) {
             /* first time here */
-            doclen = c->bread;
+            doclen_list[c->req_index] = c->bread;
         }
-        else if (c->bread != doclen) {
+        else if (c->bread != doclen_list[c->req_index]) {
             bad++;
             err_length++;
         }
@@ -1626,6 +1634,18 @@ static void test(void)
         /* Header overridden, no need to add, as it is already in hdrs */
     }
 
+	if (postdata_list_size==0){
+		postdata_list_size = 1;
+		postdata_list = &postdata;
+		postlen_list = &postlen;
+	}
+	request_list_size = postdata_list_size;
+	request_list = (char**)malloc(request_list_size*sizeof(char*));
+	reqlen_list = (apr_size_t*)malloc(request_list_size*sizeof(apr_size_t));
+
+	for(i=0;i<postdata_list_size;i++){
+		postdata = postdata_list[i];
+		postlen = postlen_list[i];
     /* setup request */
     if (posting <= 0) {
         snprintf_res = apr_snprintf(request, sizeof(_request),
@@ -1686,6 +1706,12 @@ static void test(void)
     }
 #endif              /* NOT_ASCII */
 
+    char *buff = malloc(postlen + reqlen + 1);
+    strcpy(buff, request);
+	request_list[i]=buff;
+	reqlen_list[i]=reqlen + postlen;
+	}
+
     /* This only needs to be done once */
     if ((rv = apr_sockaddr_info_get(&destsa, connecthost, APR_UNSPEC, connectport, 0, cntxt))
        != APR_SUCCESS) {
@@ -1707,6 +1733,7 @@ static void test(void)
     /* initialise lots of requests */
     for (i = 0; i < concurrency; i++) {
         con[i].socknum = i;
+        con[i].req_index=i%request_list_size;
         start_connect(&con[i]);
     }
 
@@ -1964,6 +1991,7 @@ static int open_postfile(const char *pfile)
     apr_finfo_t finfo;
     apr_status_t rv;
     char errmsg[120];
+	int i=0;
 
     rv = apr_file_open(&postfd, pfile, APR_READ, APR_OS_DEFAULT, cntxt);
     if (rv != APR_SUCCESS) {
@@ -1990,6 +2018,33 @@ static int open_postfile(const char *pfile)
                 apr_strerror(rv, errmsg, sizeof errmsg));
         return rv;
     }
+
+	i = 0;
+	postdata_list_size=1;
+	while(postlen!=i){
+		if(postdata[i++]=='\n'){
+			postdata_list_size++;
+		}
+	}
+
+    postdata_list = (char**)malloc((postdata_list_size)*(sizeof(char*)));
+	postlen_list = (apr_size_t*)malloc((postdata_list_size)*(sizeof(apr_size_t)));
+	doclen_list  = (apr_size_t*)malloc((postdata_list_size)*(sizeof(apr_size_t)));
+	i=0;
+    char *p=strtok(postdata, "\n");
+    while(p){
+			doclen_list[i]=-1;
+            postdata_list[i] = p;
+			postlen_list[i]=strlen(p);
+            i++;
+            p=strtok(NULL,"\n");
+    }
+	postdata_list_size=i;
+
+    for( i=0; i<postdata_list_size; i++){
+		printf("Req %d#\t%s\n", i, postdata_list[i]);
+    }
+
     apr_file_close(postfd);
     return 0;
 }
